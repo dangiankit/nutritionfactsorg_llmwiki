@@ -71,9 +71,7 @@ def process_video(url: str, scraper: NutritionFactsScraper, metadata_dir: str, t
         logging.getLogger("nutritionfacts_parser").error(f"Failed to fetch HTML for: {url}")
         return "error"
     try:
-        parsed_data = parse_video_page(html, url)
-        # Attach the content type for downstream reference
-        parsed_data["content_type"] = content_type
+        parsed_data = parse_video_page(html, url, content_type)
         with open(meta_filepath, "w", encoding="utf-8") as f:
             json.dump(parsed_data, f, indent=2, ensure_ascii=False)
         with open(transcript_filepath, "w", encoding="utf-8") as f:

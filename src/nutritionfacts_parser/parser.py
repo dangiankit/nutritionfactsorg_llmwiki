@@ -1,3 +1,4 @@
+import contextlib
 import json
 from .utils import generate_id
 import re
@@ -10,6 +11,7 @@ BOILERPLATE_PATTERNS = [
     re.compile(r"below is an approximation of this video", re.IGNORECASE),
     re.compile(r"to see any graphs, charts, graphics, images", re.IGNORECASE),
     re.compile(r"please consider.*volunteer", re.IGNORECASE),
+    re.compile(r"Image Credit.*", re.IGNORECASE)
 ]
 
 def clean_transcript(paragraphs: List[str]) -> str:
@@ -39,9 +41,10 @@ def clean_transcript(paragraphs: List[str]) -> str:
 
 # --- Helper functions for parse_video_page -----------------------------------
 
-def _init_data(url: str) -> Dict[str, Any]:
+def _init_data(url: str, content_type: str) -> Dict[str, Any]:
     """Create the result dictionary with default values and a generated ID."""
     return {
+        "content_type": content_type,
         "id": generate_id(url),
         "url": url,
         "title": "",
@@ -147,15 +150,31 @@ def _extract_transcript(soup: BeautifulSoup, data: Dict[str, Any]) -> None:
     data["transcript_raw"] = paragraphs
     data["transcript_clean"] = clean_transcript(paragraphs)
 
-def parse_video_page(html_content: str, url: str) -> Dict[str, Any]:
+def _extract_content_for_text(soup: BeautifulSoup, data: Dict[str, Any]) -> None:
+    if data is None or data.get("content_type") not in ["post", "questions"]:
+        return 
+
+    entry_content = soup.find(class_="entry-content") or soup.find("article")
+    if not entry_content:
+        return
+
+    # Safely find all tags; defaults to an empty list if none are found
+    found_tags = entry_content.find_all(["p", "div"], recursive=True)
+
+    # Store the result set safely
+    data["transcript_raw"] = found_tags if found_tags is not None else []
+    data["transcript_clean"] = clean_transcript(data["transcript_raw"])
+
+
+def parse_video_page(html_content: str, url: str, content_type: str) -> Dict[str, Any]:
     """Parse a NutritionFacts.org video page and return all extracted metadata."""
     soup = BeautifulSoup(html_content, "lxml")
-    data = _init_data(url)
+    data = _init_data(url, content_type)
     # Populate basic fallbacks (title, description, thumbnail) from meta tags
     _extract_fallbacks(soup, data)
     # Extract structured metadata from JSON‑LD script tags (including video_url)
     _parse_json_ld(soup, data)
     # Extract transcript information
     _extract_transcript(soup, data)
-
+    #_extract_content_for_text(soup, data)
     return data
