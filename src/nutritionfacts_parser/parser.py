@@ -3,6 +3,7 @@ from .utils import generate_id
 import re
 from typing import Dict, Any, List, Optional
 from bs4 import BeautifulSoup
+from urllib.parse import urlparse, urlunparse
 
 # Patterns for boilerplate text to filter out of transcripts
 BOILERPLATE_PATTERNS = [
@@ -48,14 +49,19 @@ def _init_data(url: str) -> Dict[str, Any]:
         "upload_date": None,
         "duration": None,
         "thumbnail_url": None,
-        "video_url": None,
+        "content_url": None,
         "embed_url": None,
         "transcript_raw": [],
         "transcript_clean": "",
     }
+def _clean_embed_url(url: str) -> str:
+    """Strip query parameters from a URL, returning only scheme, netloc, and path."""
+    parsed = urlparse(url)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
 
 def _extract_fallbacks(soup: BeautifulSoup, data: Dict[str, Any]) -> None:
-    """Populate title, description, and thumbnail from common meta tags."""
+    """Populate title, description, thumbnail, and handle hnta video fallbacks."""
+    # Basic metadata from common meta tags
     title_tag = soup.find("title")
     if title_tag:
         data["title"] = title_tag.get_text().strip()
@@ -67,6 +73,42 @@ def _extract_fallbacks(soup: BeautifulSoup, data: Dict[str, Any]) -> None:
     og_image = soup.find("meta", attrs={"property": "og:image"})
     if og_image:
         data["thumbnail_url"] = og_image.get("content", "").strip()
+
+    # HNTA video fallbacks: content_url, embed_url, upload_date, duration
+    url = data.get("url", "")
+    if "hnta" in url.lower():
+        # content_url fallback
+        if data.get("content_url") is None:
+            video_tag = soup.find("video")
+            if video_tag and video_tag.get("src"):
+                data["content_url"] = video_tag["src"]
+            else:
+                source_tag = soup.find("source")
+                if source_tag and source_tag.get("src"):
+                    data["content_url"] = source_tag["src"]
+        # embed_url fallback
+        if data.get("embed_url") is None:
+            iframe_tag = soup.find("iframe")
+            if iframe_tag and iframe_tag.get("src"):
+                data["embed_url"] = _clean_embed_url(iframe_tag["src"])
+        # upload_date fallback
+        if data.get("upload_date") is None:
+            date_tag = (
+                soup.find("meta", attrs={"property": "og:release_date"})
+                or soup.find("meta", attrs={"name": "date"})
+                or soup.find("meta", attrs={"itemprop": "uploadDate"})
+            )
+            if date_tag and date_tag.get("content"):
+                data["upload_date"] = date_tag.get("content").strip()
+        # duration fallback
+        if data.get("duration") is None:
+            dur_tag = (
+                soup.find("meta", attrs={"itemprop": "duration"})
+                or soup.find("meta", attrs={"property": "video:duration"})
+                or soup.find("meta", attrs={"name": "duration"})
+            )
+            if dur_tag and dur_tag.get("content"):
+                data["duration"] = dur_tag.get("content").strip()
 
 def _parse_json_ld(soup: BeautifulSoup, data: Dict[str, Any]) -> None:
     """Extract structured video metadata from JSON‑LD script tags."""
@@ -86,7 +128,7 @@ def _parse_json_ld(soup: BeautifulSoup, data: Dict[str, Any]) -> None:
                     data["upload_date"] = item.get("uploadDate", data["upload_date"])
                     data["duration"] = item.get("duration", data["duration"])
                     data["thumbnail_url"] = item.get("thumbnailUrl", data["thumbnail_url"])
-                    data["video_url"] = item.get("contentUrl", data["video_url"])
+                    data["content_url"] = item.get("contentUrl", data["content_url"])
                     data["embed_url"] = item.get("embedUrl", data["embed_url"])
                     return  # stop after first VideoObject
         except (json.JSONDecodeError, TypeError, AttributeError):
@@ -109,6 +151,11 @@ def parse_video_page(html_content: str, url: str) -> Dict[str, Any]:
     """Parse a NutritionFacts.org video page and return all extracted metadata."""
     soup = BeautifulSoup(html_content, "lxml")
     data = _init_data(url)
+    # Populate basic fallbacks (title, description, thumbnail) from meta tags
+    _extract_fallbacks(soup, data)
+    # Extract structured metadata from JSON‑LD script tags (including video_url)
+    _parse_json_ld(soup, data)
+    # Extract transcript information
     _extract_transcript(soup, data)
-    _extract_audio(soup, data)
+
     return data

@@ -25,15 +25,18 @@ class NutritionFactsScraper:
     and simple post‑processing such as de‑duplication and unwanted‑URL filtering.
     """
 
-    def __init__(self, delay_seconds: float = 1.0, pool_size: int = 25, headers: Optional[dict] = None):
+    # Sitemap fragments we care about – can be extended by editing this list
+    INTERESTED_SITEMAP_SUBSTRINGS = ["video-sitemap", "audio-sitemap", "post-sitemap", "questions-sitemap"]
+
+    def __init__(self, delay_seconds: float = 1.0, pool_size: int = 25, headers: Optional[dict] = None, retry_total: int = 0, backoff_factor: float = 0.0):
         self.delay_seconds = delay_seconds
         self.headers = headers or DEFAULT_HEADERS
         self.session = requests.Session()
         self.session.headers.update(self.headers)
         # Configure connection pool and retry policy
         retry = Retry(
-            total=5,
-            backoff_factor=0.5,
+            total=retry_total,
+            backoff_factor=backoff_factor,
             status_forcelist=[500, 502, 504],
             allowed_methods=["GET"],
             raise_on_status=False,
@@ -67,23 +70,22 @@ class NutritionFactsScraper:
     # Sitemap discovery
     # ---------------------------------------------------------------------
     def get_sitemap_urls(self, index_url: str = "https://nutritionfacts.org/sitemap.xml") -> List[str]:
-        """Return a sorted list of all video‑related sitemap URLs.
+        """Return a sorted list of sitemap URLs that match the interested types.
 
-        Only URLs that contain the substring ``video-sitemap`` are considered.
+        The method delegates the heavy‑lifting to two small helpers:
+        * ``_fetch_sitemap_index`` – fetches and parses the XML index.
+        * ``_extract_interested_sitemaps`` – walks the parsed soup, collects URLs
+          and counts of each content type.
         """
         try:
-            response = self._get(index_url, skip_delay=True)
+            soup = self._fetch_sitemap_index(index_url)
         except Exception as e:
             logger.error(f"Failed to fetch sitemap index from {index_url}: {e}")
             return []
 
-        soup = BeautifulSoup(response.content, "xml")
-        sitemaps: List[str] = []
-        for loc in soup.find_all("loc"):
-            sitemap_url = self._get_text(loc)
-            if "video-sitemap" in sitemap_url.lower() or "audio-sitemap" in sitemap_url.lower():
-                sitemaps.append(sitemap_url)
-        logger.info(f"Found {len(sitemaps)} video/audio sitemaps in sitemap index.")
+        sitemaps, type_counts = self._extract_interested_sitemaps(soup)
+        breakdown = self._format_type_breakdown(type_counts)
+        logger.info(f"Found {len(sitemaps)} sitemaps in sitemap index. Types: {breakdown}")
         return sorted(sitemaps)
 
     # ---------------------------------------------------------------------
@@ -173,6 +175,34 @@ class NutritionFactsScraper:
             return low
         return "other"
 
+    def _fetch_sitemap_index(self, index_url: str) -> BeautifulSoup:
+        """Fetch the sitemap index XML and parse it with BeautifulSoup."""
+        response = self._get(index_url, skip_delay=True)
+        return BeautifulSoup(response.content, "xml")
+
+    def _extract_interested_sitemaps(self, soup: BeautifulSoup) -> tuple[List[str], Dict[str, int]]:
+        """Extract URLs of interest and count types.
+
+        Returns a tuple of (sitemap URLs, type_counts).
+        """
+        sitemaps: List[str] = []
+        type_counts: Dict[str, int] = {}
+        for loc in soup.find_all("loc"):
+            sitemap_url = self._get_text(loc)
+            matched = [sub.split("-sitemap")[0] for sub in self.INTERESTED_SITEMAP_SUBSTRINGS if sub in sitemap_url.lower()]
+            if matched:
+                sitemaps.append(sitemap_url)
+                for t in matched:
+                    type_counts[t] = type_counts.get(t, 0) + 1
+        return sitemaps, type_counts
+
+    def _format_type_breakdown(self, type_counts: Dict[str, int]) -> str:
+        """Return a readable breakdown string like 'video: 5, audio: 2'."""
+        if not type_counts:
+            return "none"
+        return ", ".join(f"{k}: {v}" for k, v in type_counts.items())
+
+
     def extract_urls_from_sitemap(self, sitemap_url: str, skip_delay: bool = True) -> List[Dict[str, str]]:
         """Fetch a sitemap XML file and return the parsed entries.
 
@@ -257,9 +287,7 @@ class NutritionFactsScraper:
         ``ThreadPoolExecutor`` to maximise throughput while staying memory‑friendly.
         """
         sitemaps = self.get_sitemap_urls(index_url)
-        logger.info(
-            f"Extracting video metadata from {len(sitemaps)} sitemaps concurrently (max workers: {max_workers})..."
-        )
+        logger.info(f"Extracting content metadata from {len(sitemaps)} sitemaps concurrently (max workers: {max_workers})...")
         all_entries: List[Dict[str, str]] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_sitemap = {executor.submit(self.extract_urls_from_sitemap, sm, True): sm for sm in sitemaps}
